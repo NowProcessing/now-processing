@@ -1,4 +1,6 @@
 .spotify_token.json
+.now_processing_state.json
 .env
 *.token
 __pycache__/
+*.pyc
