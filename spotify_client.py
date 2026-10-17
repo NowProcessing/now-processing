@@ -4,17 +4,15 @@ Spotify API client for Now Processing.
 This module owns Spotify-specific work:
 - OAuth authorization and refresh-token handling.
 - Reading the currently playing item.
-- Resolving the playback context into a friendly name.
-- Returning a small normalized PlaybackSnapshot for the rest of the app.
+- Resolving playback context into a friendly name.
+- Returning a normalized PlaybackSnapshot for the rest of the app.
 
-Application credentials are supplied by spotify_credentials.py so this module
-does not need to know how local or AWS secret storage works.
+Application credentials come from spotify_credentials.py.
+OAuth token persistence comes from spotify_token_store.py.
 """
 
 from dataclasses import dataclass
 import base64
-import json
-from pathlib import Path
 import secrets
 import time
 import urllib.parse
@@ -24,17 +22,19 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 
 from spotify_credentials import get_spotify_app_credentials
+from spotify_token_store import (
+    get_token_backend,
+    load_token,
+    save_token,
+)
 
 
-# Keep Spotify URLs and OAuth settings in one place so API details do not leak
-# throughout the rest of the application.
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
 SCOPES = [
     "user-read-currently-playing",
     "user-read-playback-state",
     "playlist-read-private",
 ]
-TOKEN_FILE = Path(__file__).with_name(".spotify_token.json")
 
 AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -44,7 +44,7 @@ OEMBED_URL = "https://open.spotify.com/oembed"
 
 @dataclass(frozen=True)
 class PlaybackSnapshot:
-    """Small, app-friendly representation of Spotify's larger playback response."""
+    """Small app-friendly representation of Spotify's playback response."""
 
     is_playing: bool
     item_type: str
@@ -59,8 +59,6 @@ class PlaybackSnapshot:
 
     @property
     def fingerprint(self) -> str:
-        # Build one compact value that changes when the visible playback state
-        # changes. The state layer uses this to avoid duplicate publishing.
         return "|".join(
             [
                 "playing" if self.is_playing else "paused",
@@ -72,29 +70,18 @@ class PlaybackSnapshot:
         )
 
 
-# Persist Spotify's token response locally during development. This behavior is
-# temporary for Lambda; the next project phase moves token state into AWS.
-def save_token(token: dict) -> None:
+def persist_token(token: dict) -> None:
+    # Convert Spotify's relative expiry into an absolute timestamp before the
+    # environment-appropriate token store persists the response.
     token["expires_at"] = int(time.time()) + int(token.get("expires_in", 3600))
-    TOKEN_FILE.write_text(json.dumps(token, indent=2), encoding="utf-8")
+    save_token(token)
 
 
-# Load the locally cached OAuth token when one already exists.
-def load_token() -> dict | None:
-    if not TOKEN_FILE.exists():
-        return None
-
-    return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
-
-
-# Spotify's token endpoint expects the app client ID and secret as HTTP Basic
-# authentication.
 def token_auth_header(client_id: str, client_secret: str) -> str:
     raw = f"{client_id}:{client_secret}".encode("utf-8")
     return "Basic " + base64.b64encode(raw).decode("ascii")
 
 
-# Exchange the one-time browser authorization code for access and refresh tokens.
 def exchange_code_for_token(
     client_id: str,
     client_secret: str,
@@ -116,11 +103,10 @@ def exchange_code_for_token(
     response.raise_for_status()
 
     token = response.json()
-    save_token(token)
+    persist_token(token)
     return token
 
 
-# Refresh an expired access token using the long-lived Spotify refresh token.
 def refresh_access_token(
     client_id: str,
     client_secret: str,
@@ -129,8 +115,7 @@ def refresh_access_token(
     refresh_token = token.get("refresh_token")
     if not refresh_token:
         raise RuntimeError(
-            "No Spotify refresh token is available. "
-            "Delete .spotify_token.json and authorize again."
+            "No Spotify refresh token is available in the configured token store."
         )
 
     response = requests.post(
@@ -149,12 +134,12 @@ def refresh_access_token(
 
     refreshed = response.json()
 
-    # Spotify may omit a new refresh token. Preserve the old value when that
-    # happens so later refreshes continue to work.
+    # Spotify may omit a replacement refresh token. Preserve the current token
+    # unless Spotify explicitly gives us a new one.
     if "refresh_token" not in refreshed:
         refreshed["refresh_token"] = refresh_token
 
-    save_token(refreshed)
+    persist_token(refreshed)
     return refreshed
 
 
@@ -186,14 +171,13 @@ class OAuthCallbackHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    # Silence the local callback server's normal request log noise.
     def log_message(self, format: str, *args) -> None:
         pass
 
 
-# Run Spotify's browser-based Authorization Code flow for local development.
-# Lambda will never be expected to open a browser.
 def authorize(client_id: str, client_secret: str) -> dict:
+    # Browser authorization is valid only for local development. Lambda cannot
+    # complete an interactive localhost callback.
     state = secrets.token_urlsafe(24)
 
     params = {
@@ -232,22 +216,26 @@ def authorize(client_id: str, client_secret: str) -> dict:
     return exchange_code_for_token(client_id, client_secret, code)
 
 
-# Load the cached Spotify token and refresh it shortly before expiration. This
-# still uses the local token file until the AWS token-store phase is completed.
 def get_valid_token(client_id: str, client_secret: str) -> dict:
     token = load_token()
 
     if token is None:
+        if get_token_backend() == "dynamodb":
+            raise RuntimeError(
+                "No Spotify OAuth token exists in DynamoDB. "
+                "Bootstrap StateKey 'spotify-oauth-token' before running in Lambda."
+            )
+
         return authorize(client_id, client_secret)
 
+    # A bootstrap row contains only refresh_token and therefore no expires_at.
+    # That intentionally forces an immediate refresh on the first Lambda run.
     if int(token.get("expires_at", 0)) <= int(time.time()) + 60:
         token = refresh_access_token(client_id, client_secret, token)
 
     return token
 
 
-# Wrap authenticated Spotify GET requests so the Authorization header is built
-# consistently in one place.
 def spotify_get(url: str, access_token: str) -> requests.Response:
     return requests.get(
         url,
@@ -256,8 +244,6 @@ def spotify_get(url: str, access_token: str) -> requests.Response:
     )
 
 
-# Resolve a friendly playback-context name. Spotify oEmbed is retained as a
-# fallback for playlist/context metadata restricted by the normal Web API.
 def resolve_context_name(
     context: dict | None,
     access_token: str,
@@ -299,8 +285,6 @@ def resolve_context_name(
     return None
 
 
-# Convert Spotify's large playback response into the small predictable object
-# used by the rest of Now Processing.
 def normalize_playback(
     playback: dict,
     access_token: str,
@@ -348,8 +332,6 @@ def normalize_playback(
     )
 
 
-# Fetch live playback. The only credential-related change here is that the
-# client ID/secret now come through the environment-aware credential adapter.
 def get_current_playback() -> PlaybackSnapshot | None:
     credentials = get_spotify_app_credentials()
 

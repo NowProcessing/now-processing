@@ -2,14 +2,15 @@
 AWS Lambda entry point for the current Now Processing integration phase.
 
 Temporary test modes:
-- state       -> validate DynamoDB-backed state.
-- credentials -> validate Spotify application credentials from Secrets Manager.
+- state       -> validate DynamoDB-backed application state.
+- credentials -> validate Spotify app credentials from Secrets Manager.
+- token-store -> validate Spotify OAuth token persistence in DynamoDB.
 
-The real Spotify polling path will replace this test router after OAuth token
-state is moved out of the local .spotify_token.json file.
+No secret/token values are returned by these diagnostics.
 """
 
 from spotify_credentials import get_spotify_app_credentials
+from spotify_token_store import get_token_status
 from state_store import (
     get_backend,
     get_table_name,
@@ -21,8 +22,6 @@ from state_store import (
 TEST_STATE_KEY = "lambda-state-test"
 
 
-# Prove Lambda can retrieve both Spotify application credentials while making
-# sure neither secret value appears in output or logs.
 def test_spotify_credentials() -> dict:
     credentials = get_spotify_app_credentials()
 
@@ -35,7 +34,16 @@ def test_spotify_credentials() -> dict:
     }
 
 
-# Keep the previously proven DynamoDB state test available during the migration.
+def test_spotify_token_store() -> dict:
+    status = get_token_status()
+
+    return {
+        "statusCode": 200,
+        "test": "spotify-token-store",
+        **status,
+    }
+
+
 def test_state(event, context) -> dict:
     requested_fingerprint = event.get("fingerprint")
 
@@ -43,12 +51,7 @@ def test_state(event, context) -> dict:
         requested_fingerprint = f"lambda-request:{context.aws_request_id}"
 
     previous_fingerprint = load_last_fingerprint(TEST_STATE_KEY)
-
-    save_last_fingerprint(
-        requested_fingerprint,
-        TEST_STATE_KEY,
-    )
-
+    save_last_fingerprint(requested_fingerprint, TEST_STATE_KEY)
     confirmed_fingerprint = load_last_fingerprint(TEST_STATE_KEY)
 
     return {
@@ -64,13 +67,14 @@ def test_state(event, context) -> dict:
     }
 
 
-# Temporary router for explicit integration tests. This is peripheral scaffolding
-# and will be simplified when Lambda begins running the real application flow.
 def lambda_handler(event, context):
     mode = event.get("mode", "state")
 
     if mode == "credentials":
         return test_spotify_credentials()
+
+    if mode == "token-store":
+        return test_spotify_token_store()
 
     if mode == "state":
         return test_state(event, context)
