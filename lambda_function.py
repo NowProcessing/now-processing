@@ -1,85 +1,40 @@
 """
-AWS Lambda entry point for the current Now Processing integration phase.
+AWS Lambda entry point for Now Processing.
 
-Temporary test modes:
-- state       -> validate DynamoDB-backed application state.
-- credentials -> validate Spotify app credentials from Secrets Manager.
-- token-store -> validate Spotify OAuth token persistence in DynamoDB.
+EventBridge Scheduler invokes this function periodically. Each invocation runs
+one normal application polling cycle:
 
-No secret/token values are returned by these diagnostics.
+Spotify -> change detection -> Markdown formatting -> dry-run output -> state
+
+Until Reddit publishing is available, a changed status is written to the
+Lambda/CloudWatch log exactly as the local dry run prints it.
 """
 
-from spotify_credentials import get_spotify_app_credentials
-from spotify_token_store import get_token_status
-from state_store import (
-    get_backend,
-    get_table_name,
-    load_last_fingerprint,
-    save_last_fingerprint,
-)
+from now_processing import run_once
 
 
-TEST_STATE_KEY = "lambda-state-test"
-
-
-def test_spotify_credentials() -> dict:
-    credentials = get_spotify_app_credentials()
-
-    return {
-        "statusCode": 200,
-        "test": "spotify-credentials",
-        "clientIdPresent": bool(credentials.client_id),
-        "clientSecretPresent": bool(credentials.client_secret),
-        "secretValuesReturned": False,
-    }
-
-
-def test_spotify_token_store() -> dict:
-    status = get_token_status()
-
-    return {
-        "statusCode": 200,
-        "test": "spotify-token-store",
-        **status,
-    }
-
-
-def test_state(event, context) -> dict:
-    requested_fingerprint = event.get("fingerprint")
-
-    if not requested_fingerprint:
-        requested_fingerprint = f"lambda-request:{context.aws_request_id}"
-
-    previous_fingerprint = load_last_fingerprint(TEST_STATE_KEY)
-    save_last_fingerprint(requested_fingerprint, TEST_STATE_KEY)
-    confirmed_fingerprint = load_last_fingerprint(TEST_STATE_KEY)
-
-    return {
-        "statusCode": 200,
-        "test": "state",
-        "backend": get_backend(),
-        "table": get_table_name(),
-        "stateKey": TEST_STATE_KEY,
-        "previousFingerprint": previous_fingerprint,
-        "writtenFingerprint": requested_fingerprint,
-        "confirmedFingerprint": confirmed_fingerprint,
-        "writeConfirmed": confirmed_fingerprint == requested_fingerprint,
-    }
-
-
+# Keep the AWS entry point deliberately thin. The actual application workflow
+# remains in now_processing.py so local execution and Lambda execute the same
+# orchestration instead of maintaining two copies of the business logic.
 def lambda_handler(event, context):
-    mode = event.get("mode", "state")
+    # Scheduled invocations use an empty event and therefore force=False.
+    # A manual Lambda test may pass {"force": true} to preview the current
+    # Markdown even when the playback fingerprint has not changed.
+    force = bool(event.get("force", False)) if isinstance(event, dict) else False
 
-    if mode == "credentials":
-        return test_spotify_credentials()
+    result_code = run_once(force=force)
 
-    if mode == "token-store":
-        return test_spotify_token_store()
-
-    if mode == "state":
-        return test_state(event, context)
+    # run_once currently returns 0 for every successfully handled cycle.
+    # Unexpected exceptions are deliberately allowed to escape so Lambda marks
+    # the invocation failed and Scheduler/CloudWatch can surface the problem.
+    if result_code != 0:
+        raise RuntimeError(
+            f"Now Processing run_once returned unexpected result code {result_code}."
+        )
 
     return {
-        "statusCode": 400,
-        "error": f"Unsupported test mode: {mode}",
+        "statusCode": 200,
+        "mode": "scheduled-dry-run",
+        "force": force,
+        "requestId": getattr(context, "aws_request_id", None),
     }
