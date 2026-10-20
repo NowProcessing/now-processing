@@ -1,0 +1,26 @@
+{
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": "now-processing",
+  "server": {
+    "dir": "dist/server",
+    "entry": "index.cjs"
+  },
+  "scheduler": {
+    "tasks": {
+      "now-processing-heartbeat": {
+        "endpoint": "/internal/scheduler/heartbeat",
+        "cron": "*/1 * * * *"
+      }
+    }
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "permissions": {
+    "reddit": true
+  },
+  "dev": {
+    "subreddit": "NowProcessingDev"
+  }
+}
