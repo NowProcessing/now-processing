@@ -13,8 +13,16 @@ import { getCurrentSpotifyPlayback } from './spotify.js';
 import {
   createPlaybackFingerprint,
   getLastPlaybackFingerprint,
+  getStatusPostId,
   savePlaybackFingerprint,
+  saveStatusPostId,
 } from './state.js';
+
+import {
+  createStatusPost,
+  editStatusPost,
+  formatStatusPost,
+} from './reddit_publisher.js';
 
 /**
  * Now Processing Devvit server.
@@ -25,57 +33,55 @@ import {
  *      ↓
  *   Spotify
  *      ↓
- *   Playback fingerprint
+ *   Redis change detection
  *      ↓
- *   Redis comparison
+ *   Format Reddit Markdown
  *      ↓
- *   Log only when playback changes
+ *   Create OR edit one app-owned Reddit post
+ *      ↓
+ *   Save successful playback fingerprint
  */
 const app = new Hono();
 
 /**
  * Scheduled Now Processing poll.
- *
- * The recurring task in devvit.json invokes this endpoint once per minute.
  */
 app.post('/internal/scheduler/heartbeat', async (c) => {
-  /**
-   * Consume the Devvit scheduler request body.
-   *
-   * We don't need any task-specific input yet, but reading it keeps this
-   * endpoint aligned with the normal Devvit scheduler handler pattern.
-   */
   await c.req.json<TaskRequest>();
 
   try {
     /**
-     * Step 1:
-     * Ask Spotify what is currently playing.
+     * Read Spotify.
      */
     const playback =
       await getCurrentSpotifyPlayback();
 
-    /**
-     * Step 2:
-     * Convert that playback state into a stable comparison value.
-     */
     const fingerprint =
       createPlaybackFingerprint(playback);
 
     /**
-     * Step 3:
-     * Retrieve the last playback state that we successfully handled.
+     * Read both pieces of persistent application state.
      */
-    const previousFingerprint =
-      await getLastPlaybackFingerprint();
+    const [
+      previousFingerprint,
+      existingPostId,
+    ] = await Promise.all([
+      getLastPlaybackFingerprint(),
+      getStatusPostId(),
+    ]);
 
     /**
-     * Most scheduler runs should stop here.
+     * If playback is unchanged AND our Reddit status post already exists,
+     * there is nothing to do.
      *
-     * We still poll Spotify once per minute, but if nothing has changed,
-     * there is no reason to perform downstream work.
+     * Notice that a missing post ID deliberately bypasses this check.
+     * That lets a fresh installation create its first status post even if
+     * Redis already knows the current Spotify fingerprint.
      */
-    if (fingerprint === previousFingerprint) {
+    if (
+      fingerprint === previousFingerprint &&
+      existingPostId
+    ) {
       console.log(
         '[Now Processing] Spotify: playback unchanged'
       );
@@ -88,15 +94,40 @@ app.post('/internal/scheduler/heartbeat', async (c) => {
       );
     }
 
+    const body =
+      formatStatusPost(playback);
+
     /**
-     * Playback changed.
-     *
-     * For this milestone we only log the result. Reddit publishing will
-     * eventually happen here.
+     * Maintain exactly one Reddit status post.
      */
+    if (existingPostId) {
+      await editStatusPost(
+        existingPostId,
+        body
+      );
+    } else {
+      const newPostId =
+        await createStatusPost(body);
+
+      await saveStatusPostId(
+        newPostId
+      );
+    }
+
+    /**
+     * Only mark the Spotify state as handled AFTER Reddit publishing
+     * succeeds.
+     *
+     * If Reddit creation/editing fails, the fingerprint remains unchanged
+     * in Redis and the next scheduler run will retry.
+     */
+    await savePlaybackFingerprint(
+      fingerprint
+    );
+
     if (!playback.track) {
       console.log(
-        '[Now Processing] Spotify: nothing currently playing'
+        '[Now Processing] Published: nothing currently playing'
       );
     } else {
       const artists =
@@ -105,23 +136,10 @@ app.post('/internal/scheduler/heartbeat', async (c) => {
           ? playback.artists.join(', ')
           : 'Unknown artist';
 
-      const playbackState =
-        playback.isPlaying ? '' : ' (paused)';
-
       console.log(
-        `[Now Processing] Spotify: ${playback.track} — ${artists}${playbackState}`
+        `[Now Processing] Published: ${playback.track} — ${artists}`
       );
     }
-
-    /**
-     * Step 4:
-     * Record the state only after successful processing.
-     *
-     * Once Reddit publishing exists, this will remain below the publishing
-     * operation so a failed Reddit edit does not falsely mark the track as
-     * successfully processed.
-     */
-    await savePlaybackFingerprint(fingerprint);
 
     return c.json<TaskResponse>(
       {
@@ -136,22 +154,15 @@ app.post('/internal/scheduler/heartbeat', async (c) => {
         : String(error);
 
     console.error(
-      `[Now Processing] Spotify check failed: ${message}`
+      `[Now Processing] run failed: ${message}`
     );
 
-    /**
-     * Allow the scheduler invocation itself to fail visibly instead of
-     * hiding the error behind a successful HTTP response.
-     */
     throw error;
   }
 });
 
 /**
- * Simple development health endpoint.
- *
- * This is unrelated to the scheduler; it simply gives us a lightweight
- * endpoint for confirming that the server is alive.
+ * Lightweight server health endpoint.
  */
 app.get('/api/health', (c) =>
   c.json({
@@ -160,9 +171,6 @@ app.get('/api/health', (c) =>
   })
 );
 
-/**
- * Start the Devvit-hosted Hono server.
- */
 serve({
   fetch: app.fetch,
   createServer,

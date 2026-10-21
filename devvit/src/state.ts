@@ -65,3 +65,30 @@ export async function savePlaybackFingerprint(
     fingerprint
   );
 }
+
+const STATUS_POST_ID_KEY =
+  'now-processing:status-post-id';
+
+  /**
+ * Retrieve the Reddit post used as the permanent Now Processing status.
+ */
+export async function getStatusPostId():
+  Promise<string | undefined> {
+  const value = await redis.get(
+    STATUS_POST_ID_KEY
+  );
+
+  return value ?? undefined;
+}
+
+/**
+ * Remember the app-owned Reddit status post.
+ */
+export async function saveStatusPostId(
+  postId: string
+): Promise<void> {
+  await redis.set(
+    STATUS_POST_ID_KEY,
+    postId
+  );
+}
