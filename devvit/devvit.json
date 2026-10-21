@@ -18,7 +18,33 @@
     "dev": "vite build --watch"
   },
   "permissions": {
-    "reddit": true
+    "reddit": true,
+    "http": {
+      "enable": true,
+      "domains": [
+        "accounts.spotify.com",
+        "api.spotify.com"
+      ]
+    }
+  },
+  "settings": {
+    "global": {
+      "spotifyClientId": {
+        "type": "string",
+        "label": "Spotify Client ID",
+        "isSecret": true
+      },
+      "spotifyClientSecret": {
+        "type": "string",
+        "label": "Spotify Client Secret",
+        "isSecret": true
+      },
+      "spotifyRefreshToken": {
+        "type": "string",
+        "label": "Spotify Refresh Token",
+        "isSecret": true
+      }
+    }
   },
   "dev": {
     "subreddit": "NowProcessingDev"
