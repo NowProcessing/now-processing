@@ -1,7 +1,9 @@
 import { settings } from '@devvit/web/server';
 
 /**
- * Small subset of Spotify's token response that Now Processing needs.
+ * Small subset of Spotify's OAuth token response.
+ *
+ * We model only the fields Now Processing actually needs.
  */
 type SpotifyTokenResponse = {
   access_token?: string;
@@ -16,31 +18,41 @@ type SpotifyTokenResponse = {
 /**
  * Small subset of Spotify's currently-playing response.
  *
- * We intentionally model only fields we use rather than dragging the
- * entire Spotify response structure into this project.
+ * Spotify can return tracks, episodes, or nothing. For this first version,
+ * Now Processing only cares about normal music tracks.
  */
 type SpotifyCurrentlyPlayingResponse = {
   is_playing: boolean;
   currently_playing_type?: string;
+
   item?: {
+    id?: string;
     name: string;
+
     artists?: Array<{
       name: string;
     }>;
   } | null;
 };
 
+/**
+ * Normalized playback information returned to the rest of our application.
+ *
+ * Optional properties are omitted entirely when unavailable. This matters
+ * because this project uses TypeScript's exactOptionalPropertyTypes setting.
+ */
 export type SpotifyPlayback = {
   isPlaying: boolean;
+  trackId?: string;
   track?: string;
   artists?: string[];
 };
 
 /**
- * Convert a Devvit setting into a required string.
+ * Require a Devvit setting to contain a non-empty string.
  *
- * This gives us a useful error if one of the three Spotify secrets is
- * missing instead of sending a malformed request to Spotify.
+ * This gives us a useful configuration error before making a malformed
+ * request to Spotify.
  */
 function requireSetting(value: unknown, key: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
@@ -51,7 +63,7 @@ function requireSetting(value: unknown, key: string): string {
 }
 
 /**
- * Exchange our long-lived Spotify refresh token for a short-lived
+ * Exchange the long-lived Spotify refresh token for a short-lived
  * Spotify access token.
  */
 async function getSpotifyAccessToken(): Promise<string> {
@@ -62,16 +74,25 @@ async function getSpotifyAccessToken(): Promise<string> {
       settings.get('spotifyRefreshToken'),
     ]);
 
-  const clientId = requireSetting(clientIdValue, 'spotifyClientId');
+  const clientId = requireSetting(
+    clientIdValue,
+    'spotifyClientId'
+  );
+
   const clientSecret = requireSetting(
     clientSecretValue,
     'spotifyClientSecret'
   );
+
   const refreshToken = requireSetting(
     refreshTokenValue,
     'spotifyRefreshToken'
   );
 
+  /**
+   * Spotify's token endpoint expects the client ID and client secret
+   * as HTTP Basic authentication.
+   */
   const basicAuth = Buffer.from(
     `${clientId}:${clientSecret}`,
     'utf8'
@@ -82,14 +103,17 @@ async function getSpotifyAccessToken(): Promise<string> {
     refresh_token: refreshToken,
   });
 
-  const response = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${basicAuth}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: body.toString(),
-  });
+  const response = await fetch(
+    'https://accounts.spotify.com/api/token',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: body.toString(),
+    }
+  );
 
   const data = (await response.json()) as SpotifyTokenResponse;
 
@@ -108,12 +132,13 @@ async function getSpotifyAccessToken(): Promise<string> {
 }
 
 /**
- * Read the Spotify account's current playback state.
+ * Read the Spotify account's current playback.
  *
- * HTTP 204 is Spotify's normal "nothing is currently playing" response,
- * so that is not treated as an error.
+ * Spotify returns HTTP 204 when nothing is currently playing. That is a
+ * normal state, not an application error.
  */
-export async function getCurrentSpotifyPlayback(): Promise<SpotifyPlayback> {
+export async function getCurrentSpotifyPlayback():
+  Promise<SpotifyPlayback> {
   const accessToken = await getSpotifyAccessToken();
 
   const response = await fetch(
@@ -142,9 +167,9 @@ export async function getCurrentSpotifyPlayback(): Promise<SpotifyPlayback> {
   const data =
     (await response.json()) as SpotifyCurrentlyPlayingResponse;
 
-  /*
-   * Spotify can return something other than a normal music track,
-   * such as an episode. For this first test we care only about tracks.
+  /**
+   * The endpoint can return something other than a music track.
+   * For now, treat that as playback without track metadata.
    */
   if (
     !data.item ||
@@ -155,9 +180,25 @@ export async function getCurrentSpotifyPlayback(): Promise<SpotifyPlayback> {
     };
   }
 
+  /**
+   * exactOptionalPropertyTypes means:
+   *
+   *   trackId?: string
+   *
+   * allows trackId to be absent, but does not allow:
+   *
+   *   trackId: undefined
+   *
+   * So we conditionally add trackId only when Spotify supplied one.
+   */
   return {
     isPlaying: data.is_playing,
     track: data.item.name,
-    artists: data.item.artists?.map((artist) => artist.name) ?? [],
+    artists:
+      data.item.artists?.map((artist) => artist.name) ?? [],
+
+    ...(data.item.id !== undefined
+      ? { trackId: data.item.id }
+      : {}),
   };
 }
