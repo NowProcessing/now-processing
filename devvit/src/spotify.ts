@@ -2,8 +2,6 @@ import { settings } from '@devvit/web/server';
 
 /**
  * Small subset of Spotify's OAuth token response.
- *
- * We model only the fields Now Processing actually needs.
  */
 type SpotifyTokenResponse = {
   access_token?: string;
@@ -18,8 +16,7 @@ type SpotifyTokenResponse = {
 /**
  * Small subset of Spotify's currently-playing response.
  *
- * Spotify can return tracks, episodes, or nothing. For this first version,
- * Now Processing only cares about normal music tracks.
+ * We intentionally model only fields Now Processing currently uses.
  */
 type SpotifyCurrentlyPlayingResponse = {
   is_playing: boolean;
@@ -29,6 +26,14 @@ type SpotifyCurrentlyPlayingResponse = {
     id?: string;
     name: string;
 
+    external_urls?: {
+      spotify?: string;
+    };
+
+    album?: {
+      name?: string;
+    };
+
     artists?: Array<{
       name: string;
     }>;
@@ -36,43 +41,52 @@ type SpotifyCurrentlyPlayingResponse = {
 };
 
 /**
- * Normalized playback information returned to the rest of our application.
- *
- * Optional properties are omitted entirely when unavailable. This matters
- * because this project uses TypeScript's exactOptionalPropertyTypes setting.
+ * Normalized playback information used by the rest of Now Processing.
  */
 export type SpotifyPlayback = {
   isPlaying: boolean;
+
   trackId?: string;
   track?: string;
+  trackUrl?: string;
+  album?: string;
   artists?: string[];
 };
 
 /**
- * Require a Devvit setting to contain a non-empty string.
- *
- * This gives us a useful configuration error before making a malformed
- * request to Spotify.
+ * Require a Devvit secret to contain a usable string.
  */
-function requireSetting(value: unknown, key: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new Error(`Missing Devvit setting: ${key}`);
+function requireSetting(
+  value: unknown,
+  key: string
+): string {
+  if (
+    typeof value !== 'string' ||
+    value.trim() === ''
+  ) {
+    throw new Error(
+      `Missing Devvit setting: ${key}`
+    );
   }
 
   return value;
 }
 
 /**
- * Exchange the long-lived Spotify refresh token for a short-lived
- * Spotify access token.
+ * Exchange our long-lived Spotify refresh token for a short-lived
+ * access token.
  */
-async function getSpotifyAccessToken(): Promise<string> {
-  const [clientIdValue, clientSecretValue, refreshTokenValue] =
-    await Promise.all([
-      settings.get('spotifyClientId'),
-      settings.get('spotifyClientSecret'),
-      settings.get('spotifyRefreshToken'),
-    ]);
+async function getSpotifyAccessToken():
+  Promise<string> {
+  const [
+    clientIdValue,
+    clientSecretValue,
+    refreshTokenValue,
+  ] = await Promise.all([
+    settings.get('spotifyClientId'),
+    settings.get('spotifyClientSecret'),
+    settings.get('spotifyRefreshToken'),
+  ]);
 
   const clientId = requireSetting(
     clientIdValue,
@@ -89,10 +103,6 @@ async function getSpotifyAccessToken(): Promise<string> {
     'spotifyRefreshToken'
   );
 
-  /**
-   * Spotify's token endpoint expects the client ID and client secret
-   * as HTTP Basic authentication.
-   */
   const basicAuth = Buffer.from(
     `${clientId}:${clientSecret}`,
     'utf8'
@@ -107,17 +117,24 @@ async function getSpotifyAccessToken(): Promise<string> {
     'https://accounts.spotify.com/api/token',
     {
       method: 'POST',
+
       headers: {
         Authorization: `Basic ${basicAuth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Type':
+          'application/x-www-form-urlencoded',
       },
+
       body: body.toString(),
     }
   );
 
-  const data = (await response.json()) as SpotifyTokenResponse;
+  const data =
+    (await response.json()) as SpotifyTokenResponse;
 
-  if (!response.ok || !data.access_token) {
+  if (
+    !response.ok ||
+    !data.access_token
+  ) {
     const detail =
       data.error_description ??
       data.error ??
@@ -132,24 +149,28 @@ async function getSpotifyAccessToken(): Promise<string> {
 }
 
 /**
- * Read the Spotify account's current playback.
+ * Retrieve the Spotify account's current playback.
  *
- * Spotify returns HTTP 204 when nothing is currently playing. That is a
- * normal state, not an application error.
+ * Spotify returns HTTP 204 when there is no active playback.
  */
 export async function getCurrentSpotifyPlayback():
   Promise<SpotifyPlayback> {
-  const accessToken = await getSpotifyAccessToken();
+  const accessToken =
+    await getSpotifyAccessToken();
 
   const response = await fetch(
     'https://api.spotify.com/v1/me/player/currently-playing',
     {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization:
+          `Bearer ${accessToken}`,
       },
     }
   );
 
+  /**
+   * No active playback is normal.
+   */
   if (response.status === 204) {
     return {
       isPlaying: false,
@@ -157,7 +178,8 @@ export async function getCurrentSpotifyPlayback():
   }
 
   if (!response.ok) {
-    const detail = await response.text();
+    const detail =
+      await response.text();
 
     throw new Error(
       `Spotify currently-playing failed (${response.status}): ${detail}`
@@ -168,8 +190,10 @@ export async function getCurrentSpotifyPlayback():
     (await response.json()) as SpotifyCurrentlyPlayingResponse;
 
   /**
-   * The endpoint can return something other than a music track.
-   * For now, treat that as playback without track metadata.
+   * Now Processing currently publishes music tracks.
+   *
+   * If Spotify returns another playback type, preserve the playback
+   * state but omit track-specific metadata.
    */
   if (
     !data.item ||
@@ -181,24 +205,36 @@ export async function getCurrentSpotifyPlayback():
   }
 
   /**
-   * exactOptionalPropertyTypes means:
-   *
-   *   trackId?: string
-   *
-   * allows trackId to be absent, but does not allow:
-   *
-   *   trackId: undefined
-   *
-   * So we conditionally add trackId only when Spotify supplied one.
+   * Optional properties are conditionally added because this project
+   * uses exactOptionalPropertyTypes.
    */
   return {
     isPlaying: data.is_playing,
+
     track: data.item.name,
+
     artists:
-      data.item.artists?.map((artist) => artist.name) ?? [],
+      data.item.artists?.map(
+        (artist) => artist.name
+      ) ?? [],
 
     ...(data.item.id !== undefined
-      ? { trackId: data.item.id }
+      ? {
+          trackId: data.item.id,
+        }
+      : {}),
+
+    ...(data.item.external_urls?.spotify !== undefined
+      ? {
+          trackUrl:
+            data.item.external_urls.spotify,
+        }
+      : {}),
+
+    ...(data.item.album?.name !== undefined
+      ? {
+          album: data.item.album.name,
+        }
       : {}),
   };
 }

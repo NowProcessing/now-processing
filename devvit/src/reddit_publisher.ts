@@ -3,72 +3,114 @@ import {
   reddit,
 } from '@devvit/web/server';
 
-import type { SpotifyPlayback } from './spotify.js';
+import type {
+  SpotifyPlayback,
+} from './spotify.js';
 
 /**
- * Stable title for the single Now Processing status post.
- *
- * The body changes. The post itself does not.
+ * The title remains constant because Now Processing maintains
+ * one permanent status post.
  */
-const STATUS_POST_TITLE = 'Now Processing';
+const STATUS_POST_TITLE =
+  'Now Processing';
 
 /**
- * Format Spotify playback as the Reddit Markdown body.
+ * Escape characters that have special meaning in Reddit Markdown.
  *
- * This is intentionally simple for the first publishing milestone.
- * Once create/edit behavior is proven, we can port the richer formatting
- * from the Python implementation.
+ * Spotify metadata is external content, so we should not assume track,
+ * artist, or album names are safe Markdown.
+ */
+function escapeMarkdown(
+  value: string
+): string {
+  return value.replace(
+  /([[\]\\`*_{}()#+.!|>-])/g,
+  '\\$1'
+);
+}
+
+/**
+ * Format playback as the body of the permanent Reddit status post.
+ *
+ * The Reddit post title already says "Now Processing", so the body
+ * starts directly with the meaningful information.
  */
 export function formatStatusPost(
   playback: SpotifyPlayback
 ): string {
+  /**
+   * Nothing active.
+   */
   if (!playback.track) {
     return [
-      '# Now Processing',
+      '## Nothing playing',
       '',
-      '_Nothing currently playing._',
+      '_No active Spotify playback right now._',
       '',
       '---',
       '',
-      'Updated automatically from Spotify.',
+      '_Updated automatically from Spotify._',
     ].join('\n');
   }
 
+  const track =
+    escapeMarkdown(playback.track);
+
   const artists =
-    playback.artists && playback.artists.length > 0
-      ? playback.artists.join(', ')
+    playback.artists &&
+    playback.artists.length > 0
+      ? playback.artists
+          .map(escapeMarkdown)
+          .join(', ')
       : 'Unknown artist';
 
-  const state =
-    playback.isPlaying
-      ? '▶️ Playing'
-      : '⏸️ Paused';
+  /**
+   * Make the song title itself the Spotify link when Spotify provides
+   * one. Local or otherwise unlinked tracks still render normally.
+   */
+  const trackHeading =
+    playback.trackUrl
+      ? `## [${track}](${playback.trackUrl})`
+      : `## ${track}`;
 
-  return [
-    '# Now Processing',
-    '',
-    `## ${playback.track}`,
+  const playbackState =
+    playback.isPlaying
+      ? '▶️ **Playing now**'
+      : '⏸️ **Paused**';
+
+  const lines = [
+    trackHeading,
     '',
     `**${artists}**`,
     '',
-    state,
+    playbackState,
+  ];
+
+  if (playback.album) {
+    lines.push(
+      '',
+      `Album: *${escapeMarkdown(playback.album)}*`
+    );
+  }
+
+  lines.push(
     '',
     '---',
     '',
-    'Updated automatically from Spotify.',
-  ].join('\n');
+    '_Updated automatically from Spotify._'
+  );
+
+  return lines.join('\n');
 }
 
 /**
- * Create the app-owned status post.
- *
- * submitPost() defaults to runAs: APP, but we specify it explicitly here
- * because app ownership is an important architectural requirement.
+ * Create the single app-owned Now Processing post.
  */
 export async function createStatusPost(
   body: string
 ): Promise<string> {
-  const subredditName = context.subredditName;
+  const subredditName =
+    context.subredditName;
 
   if (!subredditName) {
     throw new Error(
@@ -76,12 +118,13 @@ export async function createStatusPost(
     );
   }
 
-  const post = await reddit.submitPost({
-    subredditName,
-    title: STATUS_POST_TITLE,
-    text: body,
-    runAs: 'APP',
-  });
+  const post =
+    await reddit.submitPost({
+      subredditName,
+      title: STATUS_POST_TITLE,
+      text: body,
+      runAs: 'APP',
+    });
 
   console.log(
     `[Now Processing] Created Reddit status post ${post.id}`
@@ -103,9 +146,10 @@ export async function editStatusPost(
     );
   }
 
-  const post = await reddit.getPostById(
-    postId as `t3_${string}`
-  );
+  const post =
+    await reddit.getPostById(
+      postId as `t3_${string}`
+    );
 
   await post.edit({
     text: body,
