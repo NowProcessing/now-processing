@@ -2,11 +2,11 @@
 """
 Now Processing application entry point.
 
-Current phase:
-Spotify -> normalize -> format -> change detection -> dry-run output.
+Application flow:
+Spotify -> normalize -> change detection -> format -> publish -> persist state.
 
-Reddit publishing is deliberately not implemented yet because API approval is
-still pending. The dry-run output shows exactly what would be sent later.
+Publishing is delegated to reddit_client.py. The current publisher backend is
+dry-run; the Reddit API implementation will later replace only that adapter.
 """
 
 import argparse
@@ -14,6 +14,7 @@ import sys
 
 import requests
 
+from reddit_client import publish_status
 from spotify_client import get_current_playback
 from state_store import load_last_fingerprint, save_last_fingerprint
 from status_formatter import format_status
@@ -36,23 +37,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Generate dry-run output even when playback has not changed.",
+        help="Publish the current status even when playback has not changed.",
     )
     return parser.parse_args()
 
 
-# For now, publishing means printing the exact Markdown that would be sent to
-# Reddit. Later this can call a Reddit publisher without changing Spotify logic.
-def dry_run_publish(markdown: str) -> None:
-    print("\n" + "=" * 70)
-    print("DRY RUN - WOULD PUBLISH THIS STATUS")
-    print("=" * 70)
-    print(markdown)
-    print("=" * 70)
-
-
-# Orchestrate one polling cycle: read Spotify, skip unchanged states, format a
-# changed status, and record that it was handled successfully.
+# Orchestrate one polling cycle. State is saved only after the publisher returns
+# successfully, so a future Reddit API failure will not incorrectly mark a track
+# as already handled.
 def run_once(force: bool = False) -> int:
     snapshot = get_current_playback()
 
@@ -71,10 +63,10 @@ def run_once(force: bool = False) -> int:
         return 0
 
     markdown = format_status(snapshot)
-    dry_run_publish(markdown)
+    publish_status(markdown)
 
-    # Treat a successful dry run like a successful publish so repeated local
-    # polls demonstrate the same change-detection behavior Lambda will use.
+    # Persist the fingerprint only after publishing succeeds. This is important
+    # once the dry-run publisher is replaced by a real Reddit API call.
     save_last_fingerprint(snapshot.fingerprint)
 
     return 0

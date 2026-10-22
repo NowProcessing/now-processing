@@ -1,0 +1,53 @@
+{
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": "now-processing",
+  "server": {
+    "dir": "dist/server",
+    "entry": "index.cjs"
+  },
+  "scheduler": {
+    "tasks": {
+      "now-processing-heartbeat": {
+        "endpoint": "/internal/scheduler/heartbeat",
+        "cron": "*/1 * * * *"
+      }
+    }
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "permissions": {
+    "reddit": true,
+    "redis": true,
+    "http": {
+      "enable": true,
+      "domains": [
+        "accounts.spotify.com",
+        "api.spotify.com"
+      ]
+    }
+  },
+  "settings": {
+    "global": {
+      "spotifyClientId": {
+        "type": "string",
+        "label": "Spotify Client ID",
+        "isSecret": true
+      },
+      "spotifyClientSecret": {
+        "type": "string",
+        "label": "Spotify Client Secret",
+        "isSecret": true
+      },
+      "spotifyRefreshToken": {
+        "type": "string",
+        "label": "Spotify Refresh Token",
+        "isSecret": true
+      }
+    }
+  },
+  "dev": {
+    "subreddit": "NowProcessingDev"
+  }
+}
