@@ -8,7 +8,10 @@ import {
   type TaskResponse,
 } from '@devvit/web/server';
 
-import { getCurrentSpotifyPlayback } from './spotify.js';
+import {
+  getCurrentSpotifyPlayback,
+  resolveSpotifyPlaylistContext,
+} from './spotify.js';
 
 import {
   createPlaybackFingerprint,
@@ -94,8 +97,19 @@ app.post('/internal/scheduler/heartbeat', async (c) => {
       );
     }
 
+    /**
+     * We only resolve playlist metadata after determining that Reddit
+     * actually needs an update.
+     */
+    const publishPlayback =
+      await resolveSpotifyPlaylistContext(
+        playback
+      );
+
     const body =
-      formatStatusPost(playback);
+      formatStatusPost(
+        publishPlayback
+      );
 
     /**
      * Maintain exactly one Reddit status post.

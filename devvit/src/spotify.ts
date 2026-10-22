@@ -14,13 +14,28 @@ type SpotifyTokenResponse = {
 };
 
 /**
- * Small subset of Spotify's currently-playing response.
+ * Spotify playback context.
  *
- * We intentionally model only fields Now Processing currently uses.
+ * We currently care specifically about playlist context, but retaining
+ * the type makes this extensible to albums/artists later.
+ */
+type SpotifyPlaybackContext = {
+  type: string;
+  href?: string;
+  uri?: string;
+
+  external_urls?: {
+    spotify?: string;
+  };
+};
+
+/**
+ * Small subset of Spotify's currently-playing response.
  */
 type SpotifyCurrentlyPlayingResponse = {
   is_playing: boolean;
   currently_playing_type?: string;
+  context?: SpotifyPlaybackContext | null;
 
   item?: {
     id?: string;
@@ -41,7 +56,18 @@ type SpotifyCurrentlyPlayingResponse = {
 };
 
 /**
- * Normalized playback information used by the rest of Now Processing.
+ * Small subset of Spotify's playlist response.
+ */
+type SpotifyPlaylistResponse = {
+  name?: string;
+
+  external_urls?: {
+    spotify?: string;
+  };
+};
+
+/**
+ * Normalized playback information used by Now Processing.
  */
 export type SpotifyPlayback = {
   isPlaying: boolean;
@@ -49,8 +75,13 @@ export type SpotifyPlayback = {
   trackId?: string;
   track?: string;
   trackUrl?: string;
+
   album?: string;
   artists?: string[];
+
+  playlistId?: string;
+  playlistName?: string;
+  playlistUrl?: string;
 };
 
 /**
@@ -74,7 +105,7 @@ function requireSetting(
 
 /**
  * Exchange our long-lived Spotify refresh token for a short-lived
- * access token.
+ * Spotify access token.
  */
 async function getSpotifyAccessToken():
   Promise<string> {
@@ -149,9 +180,64 @@ async function getSpotifyAccessToken():
 }
 
 /**
- * Retrieve the Spotify account's current playback.
+ * Extract a Spotify playlist ID from playback context.
+ */
+function getPlaylistId(
+  context: SpotifyPlaybackContext | null | undefined
+): string | undefined {
+  if (
+    !context ||
+    context.type !== 'playlist'
+  ) {
+    return undefined;
+  }
+
+  /**
+   * Preferred form:
+   *
+   * spotify:playlist:<playlist-id>
+   */
+  if (
+    context.uri?.startsWith(
+      'spotify:playlist:'
+    )
+  ) {
+    return context.uri.substring(
+      'spotify:playlist:'.length
+    );
+  }
+
+  /**
+   * Fallback to extracting the ID from Spotify's API URL.
+   */
+  if (context.href) {
+    try {
+      const url = new URL(context.href);
+      const parts =
+        url.pathname.split('/').filter(Boolean);
+
+      const playlistIndex =
+        parts.indexOf('playlists');
+
+      if (
+        playlistIndex >= 0 &&
+        parts[playlistIndex + 1]
+      ) {
+        return parts[playlistIndex + 1];
+      }
+    } catch {
+      // Context enrichment is optional.
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Read the Spotify account's current playback.
  *
- * Spotify returns HTTP 204 when there is no active playback.
+ * This first request intentionally captures only enough playlist context
+ * to identify it. We do NOT look up the playlist name every minute.
  */
 export async function getCurrentSpotifyPlayback():
   Promise<SpotifyPlayback> {
@@ -168,9 +254,6 @@ export async function getCurrentSpotifyPlayback():
     }
   );
 
-  /**
-   * No active playback is normal.
-   */
   if (response.status === 204) {
     return {
       isPlaying: false,
@@ -189,12 +272,6 @@ export async function getCurrentSpotifyPlayback():
   const data =
     (await response.json()) as SpotifyCurrentlyPlayingResponse;
 
-  /**
-   * Now Processing currently publishes music tracks.
-   *
-   * If Spotify returns another playback type, preserve the playback
-   * state but omit track-specific metadata.
-   */
   if (
     !data.item ||
     data.currently_playing_type !== 'track'
@@ -204,10 +281,14 @@ export async function getCurrentSpotifyPlayback():
     };
   }
 
-  /**
-   * Optional properties are conditionally added because this project
-   * uses exactOptionalPropertyTypes.
-   */
+  const playlistId =
+    getPlaylistId(data.context);
+
+  const playlistUrl =
+    data.context?.type === 'playlist'
+      ? data.context.external_urls?.spotify
+      : undefined;
+
   return {
     isPlaying: data.is_playing,
 
@@ -236,5 +317,105 @@ export async function getCurrentSpotifyPlayback():
           album: data.item.album.name,
         }
       : {}),
+
+    ...(playlistId !== undefined
+      ? {
+          playlistId,
+        }
+      : {}),
+
+    ...(playlistUrl !== undefined
+      ? {
+          playlistUrl,
+        }
+      : {}),
   };
+}
+
+/**
+ * Resolve the friendly playlist name only when we actually need to
+ * publish a changed state.
+ *
+ * Playlist enrichment is deliberately non-fatal. If Spotify refuses the
+ * metadata request, Now Processing still publishes the track normally.
+ */
+export async function resolveSpotifyPlaylistContext(
+  playback: SpotifyPlayback
+): Promise<SpotifyPlayback> {
+  if (!playback.playlistId) {
+    return playback;
+  }
+
+  try {
+    const accessToken =
+      await getSpotifyAccessToken();
+
+    const playlistUrl = new URL(
+      `https://api.spotify.com/v1/playlists/${encodeURIComponent(
+        playback.playlistId
+      )}`
+    );
+
+    /**
+     * We need only two fields rather than the potentially large complete
+     * playlist object.
+     */
+    playlistUrl.searchParams.set(
+      'fields',
+      'name,external_urls'
+    );
+
+    const response = await fetch(
+      playlistUrl.toString(),
+      {
+        headers: {
+          Authorization:
+            `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn(
+        `[Now Processing] Spotify playlist lookup failed (${response.status})`
+      );
+
+      return playback;
+    }
+
+    const data =
+      (await response.json()) as SpotifyPlaylistResponse;
+
+    const resolvedPlaylistUrl =
+      data.external_urls?.spotify ??
+      playback.playlistUrl;
+
+    return {
+      ...playback,
+
+      ...(data.name !== undefined
+        ? {
+            playlistName: data.name,
+          }
+        : {}),
+
+      ...(resolvedPlaylistUrl !== undefined
+        ? {
+            playlistUrl:
+              resolvedPlaylistUrl,
+          }
+        : {}),
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    console.warn(
+      `[Now Processing] Spotify playlist enrichment skipped: ${message}`
+    );
+
+    return playback;
+  }
 }

@@ -17,29 +17,28 @@ const STATUS_POST_TITLE =
 /**
  * Escape characters that have special meaning in Reddit Markdown.
  *
- * Spotify metadata is external content, so we should not assume track,
- * artist, or album names are safe Markdown.
+ * Spotify metadata is external content, so track, artist, album,
+ * and playlist names should not be allowed to accidentally change
+ * the Markdown structure of the post.
  */
 function escapeMarkdown(
   value: string
 ): string {
   return value.replace(
-  /([[\]\\`*_{}()#+.!|>-])/g,
-  '\\$1'
-);
+    /([[\]\\`*_{}()#+.!|>-])/g,
+    '\\$1'
+  );
 }
 
 /**
- * Format playback as the body of the permanent Reddit status post.
- *
- * The Reddit post title already says "Now Processing", so the body
- * starts directly with the meaningful information.
+ * Format the current Spotify playback as the body of the permanent
+ * Reddit status post.
  */
 export function formatStatusPost(
   playback: SpotifyPlayback
 ): string {
   /**
-   * Nothing active.
+   * Nothing is actively playing.
    */
   if (!playback.track) {
     return [
@@ -65,8 +64,8 @@ export function formatStatusPost(
       : 'Unknown artist';
 
   /**
-   * Make the song title itself the Spotify link when Spotify provides
-   * one. Local or otherwise unlinked tracks still render normally.
+   * Make the track title itself clickable when Spotify supplies
+   * a public track URL.
    */
   const trackHeading =
     playback.trackUrl
@@ -86,6 +85,9 @@ export function formatStatusPost(
     playbackState,
   ];
 
+  /**
+   * Album information.
+   */
   if (playback.album) {
     lines.push(
       '',
@@ -93,6 +95,33 @@ export function formatStatusPost(
     );
   }
 
+  /**
+   * Playlist context.
+   *
+   * This is one of the core Now Processing ideas:
+   * show not only what is playing, but the listening context
+   * the track came from.
+   *
+   * The playlist name becomes a direct Spotify link.
+   */
+  if (playback.playlistUrl) {
+    const playlistLabel =
+      playback.playlistName
+        ? escapeMarkdown(
+            playback.playlistName
+          )
+        : 'Spotify playlist';
+
+    lines.push(
+      '',
+      `From: [**${playlistLabel}**](${playback.playlistUrl})`
+    );
+  }
+
+  /**
+   * Quiet footer so the automation attribution does not compete
+   * visually with the actual status.
+   */
   lines.push(
     '',
     '---',
@@ -104,7 +133,10 @@ export function formatStatusPost(
 }
 
 /**
- * Create the single app-owned Now Processing post.
+ * Create the single app-owned Now Processing status post.
+ *
+ * Explicitly using APP ownership keeps the post attached to the
+ * Devvit application rather than the human developer account.
  */
 export async function createStatusPost(
   body: string
@@ -134,7 +166,7 @@ export async function createStatusPost(
 }
 
 /**
- * Replace the body of the existing app-owned status post.
+ * Replace the contents of the existing app-owned status post.
  */
 export async function editStatusPost(
   postId: string,

@@ -33,9 +33,26 @@ export function createPlaybackFingerprint(
     `${playback.track}|${playback.artists?.join(',') ?? ''}`;
 
   const playbackState =
-    playback.isPlaying ? 'playing' : 'paused';
+    playback.isPlaying
+      ? 'playing'
+      : 'paused';
 
-  return `${trackIdentity}|${playbackState}`;
+  /**
+   * Playback context is part of the displayed Now Processing state.
+   *
+   * If the same track continues while the Spotify playlist changes,
+   * that is meaningful because the Reddit post's "From:" line should
+   * change too.
+   */
+  const playlistContext =
+    playback.playlistId
+      ? `|playlist:${playback.playlistId}`
+      : '';
+
+  return (
+    `${trackIdentity}|${playbackState}` +
+    playlistContext
+  );
 }
 
 /**
