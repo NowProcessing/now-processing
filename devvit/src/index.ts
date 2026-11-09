@@ -17,9 +17,9 @@ import {
   createPlaybackFingerprint,
   getLastPlaybackFingerprint,
   getStatusPostId,
-  savePlaybackFingerprint,
+  savePlaybackState,
   saveStatusPostId,
-} from './state.js';
+} from "./state.js";
 
 import {
   createStatusPost,
@@ -135,9 +135,10 @@ app.post('/internal/scheduler/heartbeat', async (c) => {
      * If Reddit creation/editing fails, the fingerprint remains unchanged
      * in Redis and the next scheduler run will retry.
      */
-    await savePlaybackFingerprint(
-      fingerprint
-    );
+      await savePlaybackState(
+        fingerprint,
+        publishPlayback
+      );
 
     if (!playback.track) {
       console.log(
