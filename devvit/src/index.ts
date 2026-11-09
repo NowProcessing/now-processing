@@ -11,13 +11,21 @@ import {
 import {
   getCurrentSpotifyPlayback,
   resolveSpotifyPlaylistContext,
+  SpotifyCooldownError,
 } from './spotify.js';
 
 import {
+  archivePlayback,
+  clearStatusPostState,
   createPlaybackFingerprint,
+  getHistoryCommentId,
   getLastPlaybackFingerprint,
+  getLastTrackSnapshot,
+  getPlaybackHistory,
   getStatusPostId,
-  savePlaybackFingerprint,
+  isSameTrack,
+  saveHistoryCommentId,
+  savePlaybackState,
   saveStatusPostId,
 } from './state.js';
 
@@ -25,69 +33,231 @@ import {
   createStatusPost,
   editStatusPost,
   formatStatusPost,
+  isStatusPostUsable,
+  upsertHistoryComment,
 } from './reddit_publisher.js';
+
 
 /**
  * Now Processing Devvit server.
- *
- * Current runtime:
- *
- *   Scheduler
- *      ↓
- *   Spotify
- *      ↓
- *   Redis change detection
- *      ↓
- *   Format Reddit Markdown
- *      ↓
- *   Create OR edit one app-owned Reddit post
- *      ↓
- *   Save successful playback fingerprint
  */
-const app = new Hono();
+const app =
+  new Hono();
+
 
 /**
  * Scheduled Now Processing poll.
  */
-app.post('/internal/scheduler/heartbeat', async (c) => {
-  await c.req.json<TaskRequest>();
+app.post(
+  '/internal/scheduler/heartbeat',
+  async (c) => {
+    await c.req.json<TaskRequest>();
 
-  try {
-    /**
-     * Read Spotify.
-     */
-    const playback =
-      await getCurrentSpotifyPlayback();
+    try {
+      /**
+       * Read Spotify's current playback state.
+       */
+      const playback =
+        await getCurrentSpotifyPlayback();
 
-    const fingerprint =
-      createPlaybackFingerprint(playback);
+      const fingerprint =
+        createPlaybackFingerprint(
+          playback
+        );
 
-    /**
-     * Read both pieces of persistent application state.
-     */
-    const [
-      previousFingerprint,
-      existingPostId,
-    ] = await Promise.all([
-      getLastPlaybackFingerprint(),
-      getStatusPostId(),
-    ]);
 
-    /**
-     * If playback is unchanged AND our Reddit status post already exists,
-     * there is nothing to do.
-     *
-     * Notice that a missing post ID deliberately bypasses this check.
-     * That lets a fresh installation create its first status post even if
-     * Redis already knows the current Spotify fingerprint.
-     */
-    if (
-      fingerprint === previousFingerprint &&
-      existingPostId
-    ) {
-      console.log(
-        '[Now Processing] Spotify: playback unchanged'
+      /**
+       * Read persistent application state.
+       */
+      let [
+        previousFingerprint,
+        existingPostId,
+        previousTrack,
+        historyCommentId,
+      ] = await Promise.all([
+        getLastPlaybackFingerprint(),
+        getStatusPostId(),
+        getLastTrackSnapshot(),
+        getHistoryCommentId(),
+      ]);
+
+
+      /**
+       * Redis may still contain a Reddit post ID after the visible post
+       * was manually removed or deleted.
+       */
+      if (existingPostId) {
+        const usable =
+          await isStatusPostUsable(
+            existingPostId
+          );
+
+        if (!usable) {
+          console.warn(
+            `[Now Processing] Stored Reddit post ${existingPostId} is no longer usable; recreating`
+          );
+
+          await clearStatusPostState();
+
+          existingPostId =
+            undefined;
+
+          historyCommentId =
+            undefined;
+        }
+      }
+
+
+      /**
+       * Nothing changed and the Reddit post remains healthy.
+       */
+      if (
+        fingerprint ===
+          previousFingerprint &&
+        existingPostId
+      ) {
+        console.log(
+          '[Now Processing] Spotify: playback unchanged'
+        );
+
+        return c.json<TaskResponse>(
+          {
+            status: 'ok',
+          },
+          200
+        );
+      }
+
+
+      /**
+       * Friendly playlist metadata is resolved only when something
+       * actually needs publishing.
+       */
+      const publishPlayback =
+        await resolveSpotifyPlaylistContext(
+          playback
+        );
+
+
+      /**
+       * Load bounded listening history.
+       */
+      let history =
+        await getPlaybackHistory();
+
+
+      /**
+       * Archive only a real track transition.
+       *
+       * Pause/resume and temporary "nothing playing" states do not create
+       * duplicate history entries.
+       */
+      if (
+        previousTrack?.track &&
+        publishPlayback.track &&
+        !isSameTrack(
+          previousTrack,
+          publishPlayback
+        )
+      ) {
+        history =
+          await archivePlayback(
+            previousTrack
+          );
+
+        console.log(
+          `[Now Processing] Archived previous track: ${previousTrack.track}`
+        );
+      }
+
+
+      const body =
+        formatStatusPost(
+          publishPlayback
+        );
+
+
+      /**
+       * Maintain exactly one live Reddit status post.
+       */
+      let activePostId =
+        existingPostId;
+
+      if (activePostId) {
+        await editStatusPost(
+          activePostId,
+          body
+        );
+      } else {
+        activePostId =
+          await createStatusPost(
+            body
+          );
+
+        await saveStatusPostId(
+          activePostId
+        );
+      }
+
+
+      /**
+       * Maintain one permanent Previously Processing comment.
+       */
+      if (
+        history.length > 0
+      ) {
+        const activeHistoryCommentId =
+          await upsertHistoryComment(
+            activePostId,
+            historyCommentId,
+            history
+          );
+
+        if (
+          activeHistoryCommentId !==
+          historyCommentId
+        ) {
+          await saveHistoryCommentId(
+            activeHistoryCommentId
+          );
+
+          historyCommentId =
+            activeHistoryCommentId;
+        }
+      }
+
+
+      /**
+       * Persist the new successful playback only after the Reddit work
+       * succeeds.
+       */
+      await savePlaybackState(
+        fingerprint,
+        publishPlayback
       );
+
+
+      if (
+        !publishPlayback.track
+      ) {
+        console.log(
+          '[Now Processing] Published: nothing currently playing'
+        );
+      } else {
+        const artists =
+          publishPlayback.artists &&
+          publishPlayback.artists.length >
+            0
+            ? publishPlayback.artists.join(
+                ', '
+              )
+            : 'Unknown artist';
+
+        console.log(
+          `[Now Processing] Published: ${publishPlayback.track} — ${artists}`
+        );
+      }
+
 
       return c.json<TaskResponse>(
         {
@@ -95,95 +265,68 @@ app.post('/internal/scheduler/heartbeat', async (c) => {
         },
         200
       );
+    } catch (error) {
+      /**
+       * Spotify rate limiting is expected and recoverable.
+       *
+       * Return HTTP 200 so Devvit does not report a failed scheduler
+       * endpoint every minute while the Redis cooldown is active.
+       */
+      if (
+        error instanceof
+        SpotifyCooldownError
+      ) {
+        const remainingSeconds =
+          Math.max(
+            1,
+            Math.ceil(
+              (
+                error.retryAt -
+                Date.now()
+              ) / 1000
+            )
+          );
+
+        console.warn(
+          `[Now Processing] Spotify cooldown active; skipping scheduler run (${remainingSeconds}s remaining)`
+        );
+
+        return c.json<TaskResponse>(
+          {
+            status: 'ok',
+          },
+          200
+        );
+      }
+
+
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      console.error(
+        `[Now Processing] run failed: ${message}`
+      );
+
+      throw error;
     }
-
-    /**
-     * We only resolve playlist metadata after determining that Reddit
-     * actually needs an update.
-     */
-    const publishPlayback =
-      await resolveSpotifyPlaylistContext(
-        playback
-      );
-
-    const body =
-      formatStatusPost(
-        publishPlayback
-      );
-
-    /**
-     * Maintain exactly one Reddit status post.
-     */
-    if (existingPostId) {
-      await editStatusPost(
-        existingPostId,
-        body
-      );
-    } else {
-      const newPostId =
-        await createStatusPost(body);
-
-      await saveStatusPostId(
-        newPostId
-      );
-    }
-
-    /**
-     * Only mark the Spotify state as handled AFTER Reddit publishing
-     * succeeds.
-     *
-     * If Reddit creation/editing fails, the fingerprint remains unchanged
-     * in Redis and the next scheduler run will retry.
-     */
-    await savePlaybackFingerprint(
-      fingerprint
-    );
-
-    if (!playback.track) {
-      console.log(
-        '[Now Processing] Published: nothing currently playing'
-      );
-    } else {
-      const artists =
-        playback.artists &&
-        playback.artists.length > 0
-          ? playback.artists.join(', ')
-          : 'Unknown artist';
-
-      console.log(
-        `[Now Processing] Published: ${playback.track} — ${artists}`
-      );
-    }
-
-    return c.json<TaskResponse>(
-      {
-        status: 'ok',
-      },
-      200
-    );
-  } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : String(error);
-
-    console.error(
-      `[Now Processing] run failed: ${message}`
-    );
-
-    throw error;
   }
-});
+);
+
 
 /**
- * Lightweight server health endpoint.
+ * Lightweight health endpoint.
  */
-app.get('/api/health', (c) =>
-  c.json({
-    status: 'ok',
-    app: 'now-processing',
-  })
+app.get(
+  '/api/health',
+  (c) =>
+    c.json({
+      status: 'ok',
+      app: 'now-processing',
+    })
 );
+
 
 serve({
   fetch: app.fetch,
