@@ -69,17 +69,26 @@ app.post(
       /**
        * Read persistent application state.
        */
-      let [
+      /**
+       * Read persistent application state.
+       */
+      const [
         previousFingerprint,
-        existingPostId,
+        initialPostId,
         previousTrack,
-        historyCommentId,
+        initialHistoryCommentId,
       ] = await Promise.all([
         getLastPlaybackFingerprint(),
         getStatusPostId(),
         getLastTrackSnapshot(),
         getHistoryCommentId(),
       ]);
+
+      let existingPostId =
+        initialPostId;
+
+      let historyCommentId =
+        initialHistoryCommentId;
 
 
       /**
