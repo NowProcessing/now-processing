@@ -501,9 +501,9 @@ async function handleSpotifyCallback(
 
       UpdateExpression:
         [
-          'SET #status = :authorized',
-          'refreshToken = :refreshToken',
-          'authorizedAt = :authorizedAt',
+          'SET #status = :authorized,',
+          'refreshToken = :refreshToken,',
+          'authorizedAt = :authorizedAt,',
           'grantedScope = :scope',
           'REMOVE codeVerifier',
         ].join(' '),
@@ -748,7 +748,7 @@ async function markSessionFailed(
 
       UpdateExpression:
         [
-          'SET #status = :status',
+          'SET #status = :status,',
           'errorCode = :errorCode',
           'REMOVE codeVerifier',
         ].join(' '),

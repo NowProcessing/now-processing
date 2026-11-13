@@ -1,2 +1,9 @@
 ﻿node_modules/
 dist/
+
+# Local AWS deployment/test artifacts
+oauth-broker.zip
+lambda-test-event.json
+lambda-test-output.json
+lambda-trust-policy.json
+dynamodb-policy.json
