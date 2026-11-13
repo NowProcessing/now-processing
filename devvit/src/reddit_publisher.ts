@@ -11,9 +11,10 @@ import type {
   PlaybackHistoryEntry,
 } from './state.js';
 
+
 /**
- * The title remains constant because Now Processing maintains
- * one permanent status post.
+ * The Reddit post title remains constant because Now Processing
+ * maintains one permanent status post.
  */
 const STATUS_POST_TITLE =
   'Now Processing';
@@ -39,29 +40,46 @@ function escapeMarkdown(
 /**
  * Format the current Spotify playback as the body of the permanent
  * Reddit status post.
+ *
+ * Presentation goals:
+ *
+ *   - Now Processing branding is visible but secondary.
+ *   - The current track is the strongest visual element.
+ *   - Artist and playback state are easy to scan.
+ *   - Album information is deliberately quieter.
+ *   - Playlist context is visually distinct.
+ *   - Automation branding stays subtle.
+ *
+ * This function changes presentation only. It does not alter any
+ * playback, state, scheduler, or Reddit publishing behavior.
  */
 export function formatStatusPost(
   playback: SpotifyPlayback
 ): string {
+
   /**
    * Nothing is actively playing.
    */
   if (!playback.track) {
     return [
+      '### 🎧 NOW PROCESSING',
+      '',
       '## Nothing playing',
       '',
       '_No active Spotify playback right now._',
       '',
       '---',
       '',
-      '_Updated automatically from Spotify._',
+      '_Still Processing…_',
     ].join('\n');
   }
+
 
   const track =
     escapeMarkdown(
       playback.track
     );
+
 
   const artists =
     playback.artists &&
@@ -71,21 +89,29 @@ export function formatStatusPost(
           .join(', ')
       : 'Unknown artist';
 
+
   /**
    * Make the track title itself clickable when Spotify supplies
    * a public track URL.
+   *
+   * The track deliberately uses a larger heading than the
+   * Now Processing branding above it.
    */
   const trackHeading =
     playback.trackUrl
       ? `## [${track}](${playback.trackUrl})`
       : `## ${track}`;
 
+
   const playbackState =
     playback.isPlaying
       ? '▶️ **Playing now**'
       : '⏸️ **Paused**';
 
+
   const lines = [
+    '### 🎧 NOW PROCESSING',
+    '',
     trackHeading,
     '',
     `**${artists}**`,
@@ -93,26 +119,27 @@ export function formatStatusPost(
     playbackState,
   ];
 
+
   /**
-   * Album information.
+   * Album information is intentionally visually quieter than
+   * the track, artist, and playback state.
    */
   if (playback.album) {
     lines.push(
       '',
-      `Album: *${escapeMarkdown(playback.album)}*`
+      `*${escapeMarkdown(playback.album)}*`
     );
   }
+
 
   /**
    * Playlist context.
    *
-   * This is one of the core Now Processing ideas:
-   * show not only what is playing, but the listening context
-   * the track came from.
-   *
+   * Show not only what is playing, but where the track came from.
    * The playlist name becomes a direct Spotify link.
    */
   if (playback.playlistUrl) {
+
     const playlistLabel =
       playback.playlistName
         ? escapeMarkdown(
@@ -120,22 +147,24 @@ export function formatStatusPost(
           )
         : 'Spotify playlist';
 
+
     lines.push(
       '',
-      `From: [**${playlistLabel}**](${playback.playlistUrl})`
+      `📻 From: [**${playlistLabel}**](${playback.playlistUrl})`
     );
   }
 
+
   /**
-   * Quiet footer so the automation attribution does not compete
-   * visually with the actual status.
+   * Quiet branded footer.
    */
   lines.push(
     '',
     '---',
     '',
-    '_Updated automatically from Spotify._'
+    '_Still Processing…_'
   );
+
 
   return lines.join('\n');
 }
@@ -144,39 +173,43 @@ export function formatStatusPost(
 /**
  * Determine whether the status post stored in Redis is still usable.
  *
- * This handles the exact case we hit in r/NowProcessingDev:
+ * Redis may still contain a post ID after the corresponding Reddit
+ * post has been removed manually. A removed/deleted post is treated
+ * as missing so the scheduler can create a replacement.
  *
- * Redis still contained the old post ID, but the Reddit post had been
- * removed manually.
- *
- * A removed/deleted post should be treated as missing so the scheduler
- * can create a replacement.
- *
- * If Reddit cannot retrieve the stored post at all, that also counts as
- * unusable rather than crashing the scheduler.
+ * NOTE:
+ * This preserves the existing v0.9 behavior exactly. We are not
+ * changing recovery semantics during this presentation-only pass.
  */
 export async function isStatusPostUsable(
   postId: string
 ): Promise<boolean> {
+
   if (!postId.startsWith('t3_')) {
     return false;
   }
 
+
   try {
+
     const post =
       await reddit.getPostById(
         postId as `t3_${string}`
       );
 
+
     return (
       !post.removed &&
       post.removedByCategory === undefined
     );
+
   } catch (error) {
+
     console.warn(
       `[Now Processing] Could not retrieve stored status post ${postId}:`,
       error
     );
+
 
     return false;
   }
@@ -186,27 +219,31 @@ export async function isStatusPostUsable(
 /**
  * Format the bounded listening-history catalogue.
  *
- * We maintain ONE Reddit comment and continuously edit it rather than
- * generating a new automated comment for every Spotify track.
+ * We maintain ONE Reddit comment and continuously edit it rather
+ * than generating a new automated comment for every Spotify track.
  */
 export function formatHistoryComment(
   history: PlaybackHistoryEntry[]
 ): string {
+
   const lines: string[] = [
-    '## Previously Processing',
+    '## 🕘 Previously Processing',
     '',
-    '_Recent tracks, newest first._',
+    '_Recent tracks · newest first_',
     '',
   ];
 
+
   history.forEach(
     (entry, index) => {
+
       const track =
         entry.track
           ? escapeMarkdown(
               entry.track
             )
           : 'Unknown track';
+
 
       const artists =
         entry.artists &&
@@ -215,6 +252,7 @@ export function formatHistoryComment(
               .map(escapeMarkdown)
               .join(', ')
           : 'Unknown artist';
+
 
       /**
        * Make each previous track clickable when Spotify gave us
@@ -225,14 +263,20 @@ export function formatHistoryComment(
           ? `[${track}](${entry.trackUrl})`
           : track;
 
+
       lines.push(
         `${index + 1}. **${trackLabel}** — ${artists}`
       );
 
+
       /**
        * Preserve playlist context in history as well.
+       *
+       * The indented arrow visually separates listening context
+       * from the actual track entry without adding another heading.
        */
       if (entry.playlistUrl) {
+
         const playlistLabel =
           entry.playlistName
             ? escapeMarkdown(
@@ -240,20 +284,24 @@ export function formatHistoryComment(
               )
             : 'Spotify playlist';
 
+
         lines.push(
-          `   From: [${playlistLabel}](${entry.playlistUrl})`
+          `   ↳ [From: ${playlistLabel}](${entry.playlistUrl})`
         );
       }
+
 
       lines.push('');
     }
   );
 
+
   lines.push(
     '---',
     '',
-    '_Updated automatically from Spotify._'
+    '_Keeping the last 25 tracks._'
   );
+
 
   return lines.join('\n');
 }
@@ -273,16 +321,20 @@ export async function upsertHistoryComment(
   commentId: string | undefined,
   history: PlaybackHistoryEntry[]
 ): Promise<string> {
+
   const body =
     formatHistoryComment(
       history
     );
 
+
   /**
    * Try to reuse the existing history comment first.
    */
   if (commentId) {
+
     try {
+
       if (
         !commentId.startsWith('t1_')
       ) {
@@ -291,31 +343,40 @@ export async function upsertHistoryComment(
         );
       }
 
+
       const comment =
         await reddit.getCommentById(
           commentId as `t1_${string}`
         );
 
+
       /**
-       * Moderator-removed comments are no longer useful as the visible
-       * history catalogue. Fall through and create a replacement.
+       * Moderator-removed comments are no longer useful as the
+       * visible history catalogue. Fall through and create a
+       * replacement.
        */
       if (!comment.removed) {
+
         await comment.edit({
           text: body,
         });
+
 
         console.log(
           `[Now Processing] Updated history comment ${commentId}`
         );
 
+
         return commentId;
       }
+
 
       console.warn(
         `[Now Processing] History comment ${commentId} was removed; recreating`
       );
+
     } catch (error) {
+
       /**
        * Deleted/inaccessible/stale comments should not strand the
        * application. Create a replacement below.
@@ -327,11 +388,13 @@ export async function upsertHistoryComment(
     }
   }
 
+
   if (!postId.startsWith('t3_')) {
     throw new Error(
       `Invalid Reddit post ID for history comment: ${postId}`
     );
   }
+
 
   /**
    * Create the one permanent history comment as the app account.
@@ -344,14 +407,17 @@ export async function upsertHistoryComment(
       runAs: 'APP',
     });
 
+
   /**
    * Distinguish it as a moderator comment and make it sticky.
    */
   await comment.distinguish(true);
 
+
   console.log(
     `[Now Processing] Created history comment ${comment.id}`
   );
+
 
   return comment.id;
 }
@@ -366,14 +432,17 @@ export async function upsertHistoryComment(
 export async function createStatusPost(
   body: string
 ): Promise<string> {
+
   const subredditName =
     context.subredditName;
+
 
   if (!subredditName) {
     throw new Error(
       'Cannot create status post: subredditName is unavailable'
     );
   }
+
 
   const post =
     await reddit.submitPost({
@@ -383,9 +452,11 @@ export async function createStatusPost(
       runAs: 'APP',
     });
 
+
   console.log(
     `[Now Processing] Created Reddit status post ${post.id}`
   );
+
 
   return post.id;
 }
@@ -398,20 +469,24 @@ export async function editStatusPost(
   postId: string,
   body: string
 ): Promise<void> {
+
   if (!postId.startsWith('t3_')) {
     throw new Error(
       `Invalid Reddit post ID stored in Redis: ${postId}`
     );
   }
 
+
   const post =
     await reddit.getPostById(
       postId as `t3_${string}`
     );
 
+
   await post.edit({
     text: body,
   });
+
 
   console.log(
     `[Now Processing] Updated Reddit status post ${postId}`
